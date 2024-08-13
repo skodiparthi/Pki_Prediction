@@ -1,0 +1,45 @@
+import numpy as np
+import os
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import rdMolDescriptors
+import joblib
+
+def generate_morgan_descriptors(smiles):
+    """Generate Morgan fingerprints for a given SMILES string using RDKit."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        fp = rdMolDescriptors.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+        return np.array(fp)
+    else:
+        print("Invalid SMILES string.")
+        return None
+
+def predict_ki(smiles, model_path):
+    """Predict the Ki or pKi value for a given SMILES string using a pre-trained model."""
+    descriptors = generate_morgan_descriptors(smiles)
+    if descriptors is not None:
+        # Append an extra feature if your model was trained with an additional feature
+        descriptors = np.append(descriptors, 1)  # Adjust this value based on what was used during training
+        model = joblib.load(model_path)
+        prediction = model.predict([descriptors])
+        return prediction[0]
+    else:
+        return "Prediction could not be made due to invalid input."
+
+def main():
+    model_directory = '/Users/suman/Downloads'
+    models = [f for f in os.listdir(model_directory) if f.endswith('_model.pkl')]
+    if not models:
+        print("No models found in the directory.")
+        return
+
+    smiles_input = input("Enter a SMILES string to predict its pKi: ")
+    for model_file in models:
+        model_path = os.path.join(model_directory, model_file)
+        predicted_pki = predict_ki(smiles_input, model_path)
+        model_name = model_file.replace('_model.pkl', '').replace('_', ' ').capitalize()
+        print(f"The predicted pKi for {model_name} is: {predicted_pki}")
+
+if __name__ == "__main__":
+    main()

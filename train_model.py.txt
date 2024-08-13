@@ -1,0 +1,115 @@
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import rdMolDescriptors
+import numpy as np
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from scipy.stats import pearsonr, spearmanr, kendalltau
+from xgboost import XGBRegressor
+import joblib
+from sklearn.utils import resample
+
+# Function to generate Morgan fingerprints for a given SMILES string using RDKit
+def generate_morgan_descriptors(smiles):
+    mol = Chem.MolFromSmiles(smiles)  # Convert SMILES string to RDKit molecule
+    if mol:
+        # Generate Morgan fingerprint with specified radius and bit size
+        fp = rdMolDescriptors.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+        return list(fp)
+    else:
+        # Return a zero array if the molecule could not be parsed
+        return np.zeros(2048, dtype=int)
+
+# Function to evaluate model performance and calculate confidence intervals using bootstrap resampling
+def evaluate_model(y_test, y_pred):
+    bootstrap_samples = 1000  # Number of bootstrap samples
+    mse_samples, mae_samples, r2_samples, pearson_samples, spearman_samples, kendall_samples = [], [], [], [], [], []
+
+    # Perform bootstrap resampling to calculate metrics
+    for _ in range(bootstrap_samples):
+        indices = resample(range(len(y_test)), replace=True)
+        y_test_sample = y_test.iloc[indices]
+        y_pred_sample = y_pred[indices]
+        mse_samples.append(mean_squared_error(y_test_sample, y_pred_sample))
+        mae_samples.append(mean_absolute_error(y_test_sample, y_pred_sample))
+        r2_samples.append(r2_score(y_test_sample, y_pred_sample))
+        pearson_samples.append(pearsonr(y_test_sample, y_pred_sample)[0])
+        spearman_samples.append(spearmanr(y_test_sample, y_pred_sample)[0])
+        kendall_samples.append(kendalltau(y_test_sample, y_pred_sample)[0])
+
+    # Calculate and print confidence intervals for each metric
+    mse_ci = np.percentile(mse_samples, [2.5, 97.5])
+    mae_ci = np.percentile(mae_samples, [2.5, 97.5])
+    r2_ci = np.percentile(r2_samples, [2.5, 97.5])
+    pearson_ci = np.percentile(pearson_samples, [2.5, 97.5])
+    spearman_ci = np.percentile(spearman_samples, [2.5, 97.5])
+    kendall_ci = np.percentile(kendall_samples, [2.5, 97.5])
+
+    # Output the evaluation metrics and their confidence intervals
+    print(f'RMSE: {np.sqrt(np.mean(mse_samples))} (95% CI: {np.sqrt(mse_ci[0]):.3f} to {np.sqrt(mse_ci[1]):.3f})')
+    print(f'MSE: {np.mean(mse_samples)} (95% CI: {mse_ci[0]:.3f} to {mse_ci[1]:.3f})')
+    print(f'MAE: {np.mean(mae_samples)} (95% CI: {mae_ci[0]:.3f} to {mae_ci[1]:.3f})')
+    print(f'R^2: {np.mean(r2_samples)} (95% CI: {r2_ci[0]:.3f} to {r2_ci[1]:.3f})')
+    print(f'Pearson R: {np.mean(pearson_samples)} (95% CI: {pearson_ci[0]:.3f} to {pearson_ci[1]:.3f})')
+    print(f'Spearman\'s R: {np.mean(spearman_samples)} (95% CI: {spearman_ci[0]:.3f} to {spearman_ci[1]:.3f})')
+    print(f'Kendall\'s Tau: {np.mean(kendall_samples)} (95% CI: {kendall_ci[0]:.3f} to {kendall_ci[1]:.3f})')
+
+# Function to train the model and evaluate its performance
+def train_and_evaluate(X_train, X_test, y_train, y_test, model, model_name):
+    model.fit(X_train, y_train)  # Train the model on the training data
+    y_pred = model.predict(X_test)  # Predict on the test data
+    print(f"Results for {model_name}:")
+    evaluate_model(y_test, y_pred)  # Evaluate the model's performance
+    return model
+
+# Main function to handle data loading, processing, model training, and evaluation
+def main():
+    # Load the dataset
+    data = pd.read_csv('/Training_DBset.csv')  # Input your CSV file
+    data['Ki (nM)'] = pd.to_numeric(data['Ki (nM)'], errors='coerce')  # Convert 'Ki (nM)' to numeric
+    data['pKi'] = -np.log10(data['Ki (nM)'] * 1e-9)  # Calculate pKi values from Ki (nM)
+
+    # Loop over each unique target name in the dataset
+    for target_name in data['Target Name'].unique():
+        single_target_data = data[data['Target Name'] == target_name].copy()  # Filter data for the current target
+        single_target_data['Descriptors'] = single_target_data['Ligand SMILES'].apply(generate_morgan_descriptors)  # Generate Morgan descriptors
+        descriptor_list = single_target_data['Descriptors'].tolist()  # Convert descriptors to list
+        descriptors_df = pd.DataFrame(descriptor_list)  # Create a DataFrame of descriptors
+        descriptors_df.columns = descriptors_df.columns.astype(str)  # Ensure column names are strings
+        single_target_data = pd.concat([single_target_data.reset_index(drop=True), descriptors_df], axis=1)  # Combine descriptors with original data
+        single_target_data.drop(columns=['Descriptors'], inplace=True)  # Remove the Descriptors column
+        single_target_data.dropna(inplace=True)  # Drop rows with missing values
+
+        # Separate features (X) and target variable (y)
+        X = single_target_data.drop(columns=['Ki (nM)', 'pKi', 'Ligand SMILES', 'Target Name'])
+        y = single_target_data['pKi']
+
+        # Split data into training and test sets
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        # Define hyperparameters and models
+        rf_params = {
+            'n_estimators': [100, 200, 300],
+            'max_depth': [10, 20, 30],
+            'min_samples_split': [2, 5, 10]
+        }
+        xgb_params = {
+            'n_estimators': [100, 200, 300],
+            'max_depth': [3, 5, 7],
+            'learning_rate': [0.01, 0.1, 0.2]
+        }
+        models = {
+            "Random Forest": RandomizedSearchCV(RandomForestRegressor(), rf_params, n_iter=10, cv=3, random_state=42),
+            "XGBoost": RandomizedSearchCV(XGBRegressor(), xgb_params, n_iter=10, cv=3, random_state=42),
+            "Extra Trees": ExtraTreesRegressor(n_estimators=100, random_state=42)
+        }
+
+        # Train and save models for each model type
+        for name, model in models.items():
+            trained_model = train_and_evaluate(X_train, X_test, y_train, y_test, model, name)  # Train and evaluate the model
+            joblib.dump(trained_model, f"/Downloads/{name.replace(' ', '_').lower()}_model.pkl")  # Save the trained model
+            print(f'Model saved for target: {target_name} using {name}')
+
+if __name__ == "__main__":
+    main()  # Run the main function
